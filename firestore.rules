@@ -1,0 +1,54 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: surveys
+    // Document ID: auto-generated
+    // Fields:
+    //   - clientName: string (required, 1-200 chars)
+    //   - answers: map (required)
+    //   - completedAt: string (required, ISO 8601)
+    //
+    // Collection: users
+    // Document ID: userId
+    // Fields:
+    //   - role: string (admin/user)
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+         (request.auth.token.email == "huynguyen.arc95@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidSurvey(data) {
+      return data.keys().hasAll(['clientName', 'answers', 'completedAt']) &&
+             data.keys().hasOnly(['clientName', 'answers', 'completedAt']) &&
+             data.clientName is string && data.clientName.size() > 0 && data.clientName.size() <= 200 &&
+             data.answers is map &&
+             data.completedAt is string;
+    }
+
+    match /surveys/{surveyId} {
+      // Allow public creation of surveys
+      allow create: if isValidSurvey(request.resource.data);
+      // Only admins can read/manage surveys
+      allow read, update, delete: if isAdmin();
+    }
+
+    match /users/{userId} {
+      allow read: if isAuthenticated() && request.auth.uid == userId;
+      allow write: if isAdmin();
+    }
+  }
+}

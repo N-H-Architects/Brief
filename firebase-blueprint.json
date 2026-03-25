@@ -1,0 +1,35 @@
+{
+  "entities": {
+    "SurveyResult": {
+      "title": "Survey Result",
+      "description": "A completed survey from a client.",
+      "type": "object",
+      "properties": {
+        "clientName": {
+          "type": "string",
+          "description": "Name of the client (from g0_1)"
+        },
+        "answers": {
+          "type": "object",
+          "description": "All survey answers keyed by question ID"
+        },
+        "completedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the survey was completed"
+        }
+      },
+      "required": [
+        "clientName",
+        "answers",
+        "completedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/surveys/{surveyId}": {
+      "schema": "SurveyResult",
+      "description": "Collection of survey results."
+    }
+  }
+}

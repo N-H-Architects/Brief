@@ -34,7 +34,7 @@ import * as ExcelJS from 'exceljs';
 import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
 import { db } from './firebase';
-import { collection, addDoc } from 'firebase/firestore';
+import { collection, addDoc, getDocs, query, orderBy } from 'firebase/firestore';
 import { auth } from './firebase';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
@@ -293,64 +293,28 @@ function SurveyApp() {
   const [isFinished, setIsFinished] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isExportingPDF, setIsExportingPDF] = useState(false);
-  const [isUploadingToDrive, setIsUploadingToDrive] = useState(false);
-  const [isCheckingConnection, setIsCheckingConnection] = useState(false);
-  const [connectionStatus, setConnectionStatus] = useState<{
-    ok: boolean;
-    folderIdSet: boolean;
-    serviceAccountSet: boolean;
-    serviceAccountEmail: string;
-  } | null>(null);
+  const [isAdminView, setIsAdminView] = useState(false);
+  const [surveys, setSurveys] = useState<any[]>([]);
+  const [isLoadingSurveys, setIsLoadingSurveys] = useState(false);
 
-  const checkConnection = async () => {
-    setIsCheckingConnection(true);
-    setConnectionStatus(null);
+  const fetchSurveys = async () => {
+    setIsLoadingSurveys(true);
     try {
-      const response = await fetch('/api/health');
-      const contentType = response.headers.get('content-type');
-      
-      if (response.ok) {
-        if (contentType && contentType.includes('application/json')) {
-          const data = await response.json();
-          setConnectionStatus({
-            ok: true,
-            folderIdSet: data.config.folderIdSet,
-            serviceAccountSet: data.config.serviceAccountSet,
-            serviceAccountEmail: data.config.serviceAccountEmail
-          });
-        } else {
-          const text = await response.text();
-          if (text.includes('<title>Cookie check</title>')) {
-            alert('Trình duyệt đang chặn cookie bảo mật của AI Studio. Vui lòng nhấn vào biểu tượng "Mở trong tab mới" (hình mũi tên ở góc trên bên phải) để sử dụng tính năng này.');
-          } else {
-            throw new Error(`Server returned 200 OK but content type is not JSON. Body starts with: ${text.substring(0, 100)}`);
-          }
-        }
-      } else {
-        if (contentType && contentType.includes('application/json')) {
-          const errorData = await response.json();
-          throw new Error(errorData.error || 'Server returned error');
-        } else {
-          const text = await response.text();
-          if (text.includes('<title>Cookie check</title>')) {
-            throw new Error('Trình duyệt đang chặn cookie bảo mật. Vui lòng mở ứng dụng trong tab mới.');
-          } else {
-            throw new Error(`Server returned non-JSON response (${response.status} ${response.statusText}). Body starts with: ${text.substring(0, 100)}`);
-          }
-        }
-      }
+      const q = query(collection(db, 'surveys'), orderBy('completedAt', 'desc'));
+      const querySnapshot = await getDocs(q);
+      const surveyData = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setSurveys(surveyData);
     } catch (error) {
-      console.error('Connection check failed:', error);
-      setConnectionStatus({
-        ok: false,
-        folderIdSet: false,
-        serviceAccountSet: false,
-        serviceAccountEmail: 'Lỗi: ' + (error instanceof Error ? error.message : String(error))
-      });
+      console.error('Error fetching surveys:', error);
+      alert('Không thể tải danh sách khảo sát.');
     } finally {
-      setIsCheckingConnection(false);
+      setIsLoadingSurveys(false);
     }
   };
+
   const [isSaving, setIsSaving] = useState(false);
 
   const handleInputChange = (id: string, value: any) => {
@@ -502,76 +466,6 @@ function SurveyApp() {
     }
   };
 
-  const handleGoogleDriveUpload = async () => {
-    uploadToDrive();
-  };
-
-  const uploadToDrive = async () => {
-    console.log('Starting Server-side Google Drive upload (Excel)...');
-    setIsUploadingToDrive(true);
-    try {
-      // 1. Generate Excel Blob
-      const { blob: excelBlob, fileName } = await getExcelBlob();
-      console.log('Excel generated successfully for Drive upload, size:', excelBlob.size);
-
-      // 2. Upload to Server Endpoint
-      const formData = new FormData();
-      formData.append('file', excelBlob, fileName);
-      formData.append('fileName', fileName);
-
-      const apiUrl = '/api/upload-to-drive';
-      console.log('Fetching API at:', apiUrl);
-
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (response.ok) {
-        const contentType = response.headers.get('content-type');
-        if (contentType && contentType.includes('application/json')) {
-          const result = await response.json();
-          console.log('Drive upload successful:', result);
-          alert('Đã tải file Excel lên Google Drive thành công!');
-        } else {
-          const text = await response.text();
-          console.error('Drive upload returned 200 OK but not JSON:', text);
-          
-          if (text.includes('<title>Cookie check</title>')) {
-            alert('Trình duyệt đang chặn cookie bảo mật của AI Studio. Vui lòng nhấn vào biểu tượng "Mở trong tab mới" (hình mũi tên ở góc trên bên phải) để sử dụng tính năng này.');
-          } else {
-            throw new Error(`Server returned 200 OK but content type is not JSON. Body starts with: ${text.substring(0, 100)}`);
-          }
-        }
-      } else {
-        let errorMessage = response.statusText;
-        const contentType = response.headers.get('content-type');
-        
-        if (contentType && contentType.includes('application/json')) {
-          const errorData = await response.json();
-          console.error('Drive Upload Error Response (JSON):', errorData);
-          errorMessage = errorData.error || errorMessage;
-        } else {
-          const text = await response.text();
-          console.error('Drive Upload Error Response (Non-JSON):', text);
-          
-          if (text.includes('<title>Cookie check</title>')) {
-            errorMessage = 'Trình duyệt đang chặn cookie bảo mật. Vui lòng mở ứng dụng trong tab mới để tiếp tục.';
-          } else {
-            errorMessage = `Server returned non-JSON response (${response.status} ${response.statusText}). Body starts with: ${text.substring(0, 100)}`;
-          }
-        }
-        
-        alert(`Có lỗi xảy ra khi tải lên Google Drive: ${errorMessage}`);
-      }
-    } catch (error) {
-      console.error('Drive Upload Error:', error);
-      alert('Có lỗi xảy ra khi kết nối với Google Drive. Chi tiết: ' + (error instanceof Error ? error.message : String(error)));
-    } finally {
-      setIsUploadingToDrive(false);
-    }
-  };
-
   const exportToPDF = async () => {
     setIsExportingPDF(true);
     try {
@@ -691,6 +585,80 @@ function SurveyApp() {
     </div>
   );
 
+  if (isAdminView) {
+    return (
+      <div className="min-h-screen bg-[#F8F8F8] text-black font-sans p-6 md:p-12">
+        <div className="max-w-6xl mx-auto">
+          <div className="flex justify-between items-center mb-12">
+            <div>
+              <h1 className="text-3xl font-black tracking-tight">Bảng điều khiển Admin</h1>
+              <p className="text-sm text-gray-500 font-medium">Danh sách các khảo sát đã được gửi</p>
+            </div>
+            <button 
+              onClick={() => setIsAdminView(false)}
+              className="px-6 py-3 bg-black text-white rounded-xl font-bold text-sm hover:bg-gray-800 transition-all"
+            >
+              Quay lại khảo sát
+            </button>
+          </div>
+
+          {isLoadingSurveys ? (
+            <div className="flex flex-col items-center justify-center py-20 gap-4">
+              <div className="w-10 h-10 border-4 border-black/10 border-t-black rounded-full animate-spin" />
+              <p className="text-sm font-bold text-gray-400">Đang tải dữ liệu...</p>
+            </div>
+          ) : surveys.length === 0 ? (
+            <div className="bg-white rounded-[32px] p-20 text-center border border-black/5">
+              <p className="text-gray-400 font-bold">Chưa có khảo sát nào được gửi.</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {surveys.map((survey) => (
+                <div key={survey.id} className="bg-white rounded-[32px] p-8 border border-black/5 shadow-xl shadow-black/[0.02] flex flex-col justify-between">
+                  <div>
+                    <div className="flex justify-between items-start mb-6">
+                      <div className="p-3 bg-black/5 rounded-2xl">
+                        <User size={24} />
+                      </div>
+                      <p className="text-[10px] font-black text-gray-300 uppercase tracking-widest">
+                        {new Date(survey.completedAt).toLocaleDateString('vi-VN')}
+                      </p>
+                    </div>
+                    <h3 className="text-xl font-black mb-2">{survey.clientName}</h3>
+                    <p className="text-xs text-gray-400 font-medium mb-8">ID: {survey.id}</p>
+                  </div>
+                  
+                  <div className="space-y-3">
+                    <button 
+                      onClick={() => {
+                        setAnswers(survey.answers);
+                        setTimeout(() => exportToExcel(), 100);
+                      }}
+                      className="w-full flex items-center justify-center gap-2 py-3 bg-gray-50 hover:bg-black hover:text-white rounded-xl transition-all font-bold text-xs"
+                    >
+                      <FileSpreadsheet size={16} />
+                      Tải Excel
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setAnswers(survey.answers);
+                        setTimeout(() => exportToPDF(), 100);
+                      }}
+                      className="w-full flex items-center justify-center gap-2 py-3 bg-gray-50 hover:bg-black hover:text-white rounded-xl transition-all font-bold text-xs"
+                    >
+                      <FileText size={16} />
+                      Tải PDF
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   if (isFinished) {
     return (
       <>
@@ -708,6 +676,13 @@ function SurveyApp() {
               Cảm ơn bạn đã dành thời gian chia sẻ. Đội ngũ kiến trúc sư của <span className="text-black font-bold">N-H-Architects</span> sẽ nghiên cứu kỹ lưỡng các thông tin này để kiến tạo nên một không gian sống đẳng cấp và mang đậm dấu ấn cá nhân của bạn.
             </p>
             <div className="flex flex-col gap-4">
+              <div className="p-6 bg-blue-50 border border-blue-100 rounded-[32px] mb-4">
+                <p className="text-sm text-blue-700 font-bold flex items-center justify-center gap-2">
+                  <CheckCircle size={18} />
+                  Khảo sát đã được gửi thành công về hệ thống Admin!
+                </p>
+              </div>
+              
               <button 
                 onClick={exportToExcel}
                 disabled={isExporting}
@@ -718,7 +693,7 @@ function SurveyApp() {
                 ) : (
                   <FileSpreadsheet className="w-5 h-5" />
                 )}
-                {isExporting ? 'Đang xuất Excel...' : 'Xuất file Excel'}
+                {isExporting ? 'Đang xuất Excel...' : 'Tải file Excel về máy'}
               </button>
               <button 
                 onClick={exportToPDF}
@@ -730,68 +705,16 @@ function SurveyApp() {
                 ) : (
                   <FileText className="w-5 h-5" />
                 )}
-                {isExportingPDF ? 'Đang xuất PDF...' : 'Xuất file PDF'}
+                {isExportingPDF ? 'Đang xuất PDF...' : 'Tải file PDF về máy'}
               </button>
-              <button 
-                onClick={handleGoogleDriveUpload}
-                disabled={isUploadingToDrive}
-                className={`px-8 py-4 bg-blue-600 text-white rounded-full hover:bg-blue-700 transition-all font-bold shadow-lg flex items-center justify-center gap-2 ${isUploadingToDrive ? 'opacity-50 cursor-not-allowed' : ''}`}
-              >
-                {isUploadingToDrive ? (
-                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                ) : (
-                  <Upload className="w-5 h-5" />
-                )}
-                {isUploadingToDrive ? 'Đang tải lên Drive...' : 'Lưu Excel vào Google Drive'}
-              </button>
-
-              <button
-                onClick={checkConnection}
-                disabled={isCheckingConnection}
-                className="px-8 py-4 bg-gray-600 text-white rounded-full hover:bg-gray-700 transition-all font-bold shadow-lg flex items-center justify-center gap-2"
-              >
-                {isCheckingConnection ? (
-                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                ) : (
-                  <ShieldCheck className="w-5 h-5" />
-                )}
-                {isCheckingConnection ? 'Đang kiểm tra...' : 'Kiểm tra kết nối Drive'}
-              </button>
-
-              {connectionStatus && (
-                <div className={`p-6 rounded-[32px] border text-left ${connectionStatus.ok ? 'bg-blue-50 border-blue-200' : 'bg-red-50 border-red-200'} text-sm`}>
-                  <h4 className="font-bold mb-3 flex items-center gap-2 text-black">
-                    {connectionStatus.ok ? <CheckCircle size={18} className="text-green-600" /> : <AlertTriangle size={18} className="text-red-600" />}
-                    Trạng thái kết nối Drive:
-                  </h4>
-                  <ul className="space-y-2 text-gray-700">
-                    <li className="flex items-center gap-2">
-                      <span className={`w-2 h-2 rounded-full ${connectionStatus.folderIdSet ? 'bg-green-500' : 'bg-red-500'}`}></span>
-                      Folder ID: {connectionStatus.folderIdSet ? <span className="text-green-600 font-bold">Đã cấu hình</span> : <span className="text-red-600 font-bold">Chưa cấu hình</span>}
-                    </li>
-                    <li className="flex items-center gap-2">
-                      <span className={`w-2 h-2 rounded-full ${connectionStatus.serviceAccountSet ? 'bg-green-500' : 'bg-red-500'}`}></span>
-                      Service Account: {connectionStatus.serviceAccountSet ? <span className="text-green-600 font-bold">Đã cấu hình</span> : <span className="text-red-600 font-bold">Chưa cấu hình</span>}
-                    </li>
-                    <li className="mt-4">
-                      <p className="font-bold text-black mb-1">Email Service Account (Copy email này):</p>
-                      <div className="p-3 bg-white border border-black/10 rounded-xl font-mono text-[10px] break-all select-all shadow-inner">
-                        {connectionStatus.serviceAccountEmail}
-                      </div>
-                    </li>
-                    <li className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-xl text-yellow-800 text-xs italic leading-relaxed">
-                      <strong>Quan trọng:</strong> Bạn PHẢI vào Google Drive, chọn thư mục lưu trữ, nhấn "Chia sẻ" và thêm email ở trên với quyền <strong>"Người chỉnh sửa" (Editor)</strong>.
-                    </li>
-                  </ul>
-                </div>
-              )}
+              
               <button 
                 onClick={() => {
                   setIsFinished(false);
                   setActiveSection(0);
                   setAnswers({});
                 }}
-                className="text-sm text-gray-400 hover:text-black transition-colors underline underline-offset-4"
+                className="mt-6 text-sm text-gray-400 hover:text-black transition-colors underline underline-offset-4"
               >
                 Làm lại khảo sát mới
               </button>
@@ -1058,7 +981,7 @@ function SurveyApp() {
                   {isSaving ? (
                     <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                   ) : (
-                    activeSection === briefSections.length - 1 ? 'Hoàn tất khảo sát' : 'Tiếp theo'
+                    activeSection === briefSections.length - 1 ? 'Gửi khảo sát' : 'Tiếp theo'
                   )}
                   {!isSaving && <ChevronRight size={20} className="group-hover:translate-x-1 transition-transform" />}
                 </button>
@@ -1083,7 +1006,22 @@ function SurveyApp() {
       {/* Footer */}
       <footer className="max-w-6xl mx-auto px-6 py-20 border-t border-black/5 flex flex-col md:flex-row justify-between items-center gap-8 opacity-40 text-[10px] font-bold tracking-[0.3em] uppercase">
         <p>© 2026 N-H-ARCHITECTS — TOWNHOUSES & VILLAS</p>
-        <div className="flex gap-8">
+        <div className="flex gap-8 items-center">
+          <button 
+            onClick={() => {
+              const password = prompt('Nhập mật khẩu Admin:');
+              if (password === 'admin123') {
+                setIsAdminView(true);
+                fetchSurveys();
+              } else if (password !== null) {
+                alert('Mật khẩu không đúng!');
+              }
+            }}
+            className="hover:text-black transition-colors flex items-center gap-1"
+          >
+            <ShieldCheck size={12} />
+            Admin
+          </button>
           <a href="#" className="hover:text-black transition-colors">Facebook</a>
           <a href="#" className="hover:text-black transition-colors">Instagram</a>
           <a href="#" className="hover:text-black transition-colors">Website</a>

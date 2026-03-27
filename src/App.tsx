@@ -26,12 +26,13 @@ import {
   FileText
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import ExcelJS from 'exceljs';
+import * as ExcelJS from 'exceljs';
+import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
 import { db } from './firebase';
 import { collection, addDoc } from 'firebase/firestore';
 import { auth } from './firebase';
-import jsPDF from 'jspdf';
+import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 
 enum OperationType {
@@ -288,16 +289,26 @@ function SurveyApp() {
   const [isFinished, setIsFinished] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isExportingPDF, setIsExportingPDF] = useState(false);
+  const [isUploadingToDrive, setIsUploadingToDrive] = useState(false);
+  const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
   const handleInputChange = (id: string, value: any) => {
     setAnswers(prev => ({ ...prev, [id]: value }));
   };
 
-  const exportToExcel = async () => {
-    setIsExporting(true);
+  const getExcelBlob = async (): Promise<{ blob: Blob, fileName: string }> => {
+    const fileName = `Khao_sat_NH_Architects_${answers['g0_1'] || 'Khach_hang'}.xlsx`;
     try {
-      const workbook = new ExcelJS.Workbook();
+      console.log('Attempting ExcelJS generation...');
+      let workbook: any;
+      if ((ExcelJS as any).Workbook) {
+        workbook = new (ExcelJS as any).Workbook();
+      } else if ((ExcelJS as any).default && (ExcelJS as any).default.Workbook) {
+        workbook = new (ExcelJS as any).default.Workbook();
+      } else {
+        throw new Error('ExcelJS Workbook constructor not found');
+      }
       const worksheet = workbook.addWorksheet('Khao sat N-H Architects');
 
       // Add Company Info Header
@@ -372,19 +383,136 @@ function SurveyApp() {
       worksheet.getColumn(1).width = 50;
       worksheet.getColumn(2).width = 80;
 
-      // Add Footer
-      worksheet.addRow([]);
-      const footerRow = worksheet.addRow(['Cảm ơn quý khách đã tin tưởng N-H-Architects!', '']);
-      footerRow.font = { italic: true, color: { argb: 'FF666666' } };
-
       const buffer = await workbook.xlsx.writeBuffer();
-      const fileName = `Khao_sat_NH_Architects_${answers['g0_1'] || 'Khach_hang'}.xlsx`;
-      saveAs(new Blob([buffer]), fileName);
+      return { blob: new Blob([buffer]), fileName };
+    } catch (exceljsError) {
+      console.warn('ExcelJS failed, falling back to XLSX:', exceljsError);
+      // Fallback to XLSX (SheetJS)
+      const data = [
+        ['N-H-ARCHITECTS'],
+        ['THIẾT KẾ KIẾN TRÚC, NỘI THẤT VÀ CẢNH QUAN'],
+        ['THÔNG TIN KHÁCH HÀNG'],
+        ['Họ và tên:', answers['g0_1'] || 'Chưa cung cấp'],
+        ['Năm sinh:', answers['g0_2'] || 'Chưa cung cấp'],
+        ['Ngày thực hiện:', new Date().toLocaleDateString('vi-VN')],
+        []
+      ];
+
+      briefSections.forEach(section => {
+        data.push([section.title.toUpperCase()]);
+        section.questions.forEach(q => {
+          let answer = answers[q.id];
+          if (Array.isArray(answer)) {
+            if (q.type === 'file') {
+              answer = answer.map((f: any) => f.name).join(', ');
+            } else {
+              answer = answer.join(', ');
+            }
+          }
+          data.push([q.text, answer || '(Trống)']);
+        });
+        data.push([]);
+      });
+
+      const ws = XLSX.utils.aoa_to_sheet(data);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Khao sat');
+      const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+      return { blob: new Blob([wbout]), fileName };
+    }
+  };
+
+  const exportToExcel = async () => {
+    console.log('Starting Excel export...');
+    setIsExporting(true);
+    try {
+      const { blob, fileName } = await getExcelBlob();
+      saveAs(blob, fileName);
+      console.log('Excel export successful');
     } catch (error) {
       console.error('Excel Export Error:', error);
-      alert('Có lỗi xảy ra khi xuất file Excel.');
+      alert('Có lỗi xảy ra khi xuất file Excel. Chi tiết: ' + (error instanceof Error ? error.message : String(error)));
     } finally {
       setIsExporting(false);
+    }
+  };
+
+  const handleGoogleDriveUpload = async () => {
+    const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+    if (!clientId || clientId === 'YOUR_GOOGLE_CLIENT_ID') {
+      alert('Vui lòng cấu hình Google Client ID trong phần Secrets (VITE_GOOGLE_CLIENT_ID).');
+      return;
+    }
+    if (!googleAccessToken) {
+      // Initialize Google OAuth2
+      const client = (window as any).google.accounts.oauth2.initTokenClient({
+        client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
+        scope: 'https://www.googleapis.com/auth/drive.file',
+        callback: (response: any) => {
+          if (response.access_token) {
+            setGoogleAccessToken(response.access_token);
+            uploadToDrive(response.access_token);
+          }
+        },
+      });
+      client.requestAccessToken();
+    } else {
+      uploadToDrive(googleAccessToken);
+    }
+  };
+
+  const uploadToDrive = async (token: string) => {
+    console.log('Starting Google Drive upload (Excel)...');
+    setIsUploadingToDrive(true);
+    try {
+      // 1. Generate Excel Blob
+      const { blob: excelBlob, fileName } = await getExcelBlob();
+      console.log('Excel generated successfully for Drive upload, size:', excelBlob.size);
+
+      // 2. Upload to Google Drive
+      const folderId = import.meta.env.VITE_GOOGLE_DRIVE_FOLDER_ID;
+      const metadata: any = {
+        name: fileName,
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      };
+
+      if (folderId && folderId !== 'YOUR_GOOGLE_DRIVE_FOLDER_ID') {
+        metadata.parents = [folderId];
+      }
+
+      console.log('Uploading Excel to Drive with metadata:', metadata);
+
+      const form = new FormData();
+      form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+      form.append('file', excelBlob);
+
+      const response = await fetch(`https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&key=${import.meta.env.VITE_GOOGLE_API_KEY}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        body: form,
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        console.log('Drive upload successful:', result);
+        alert('Đã tải file Excel lên Google Drive thành công!');
+      } else {
+        const errorData = await response.json();
+        console.error('Drive Upload Error Response:', errorData);
+        if (response.status === 401) {
+          setGoogleAccessToken(null);
+          alert('Phiên làm việc Google đã hết hạn. Vui lòng thử lại.');
+        } else {
+          alert(`Có lỗi xảy ra khi tải lên Google Drive: ${errorData.error?.message || response.statusText}`);
+        }
+      }
+    } catch (error) {
+      console.error('Drive Upload Error:', error);
+      alert('Có lỗi xảy ra khi kết nối với Google Drive. Chi tiết: ' + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setIsUploadingToDrive(false);
     }
   };
 
@@ -448,59 +576,129 @@ function SurveyApp() {
   const currentSection = briefSections[activeSection];
   const progress = ((activeSection + 1) / briefSections.length) * 100;
 
+  const pdfContent = (
+    <div id="pdf-content" className="fixed left-[-9999px] top-0 w-[800px] p-12 font-sans" style={{ backgroundColor: '#ffffff', color: '#000000' }}>
+      <div className="flex items-center gap-4 mb-12 border-b-2 pb-8" style={{ borderBottomColor: '#000000' }}>
+        <div className="w-16 h-16 rounded-full flex items-center justify-center" style={{ backgroundColor: '#000000', color: '#ffffff' }}>
+          <Logo className="w-10 h-10" />
+        </div>
+        <div>
+          <h1 className="text-2xl font-black tracking-tighter" style={{ color: '#000000' }}>N-H-ARCHITECTS</h1>
+          <p className="text-[10px] font-bold tracking-[0.3em] uppercase" style={{ color: '#9ca3af' }}>Townhouses & Villas Design</p>
+        </div>
+      </div>
+
+      <div className="mb-12">
+        <h2 className="text-3xl font-bold mb-2 uppercase" style={{ color: '#000000' }}>BẢN TỔNG HỢP KHẢO SÁT</h2>
+        <p className="font-medium" style={{ color: '#6b7280' }}>Ngày thực hiện: {new Date().toLocaleDateString('vi-VN')}</p>
+      </div>
+
+      <div className="space-y-10">
+        {briefSections.map((section, sIdx) => (
+          <div key={sIdx} className="space-y-4">
+            <h3 className="text-xl font-bold border-l-4 pl-4 uppercase py-2" style={{ borderLeftColor: '#000000', backgroundColor: '#f9fafb', color: '#000000' }}>{section.title}</h3>
+            <div className="grid grid-cols-1 gap-4">
+              {section.questions.map((q) => {
+                let answer = answers[q.id];
+                if (!answer) return null;
+                
+                if (Array.isArray(answer)) {
+                  if (q.type === 'file') {
+                    answer = `${answer.length} hình ảnh đã tải lên`;
+                    const desc = answers[`${q.id}_desc`];
+                    if (desc) answer += ` (${desc})`;
+                  } else {
+                    answer = answer.join(', ');
+                  }
+                }
+
+                return (
+                  <div key={q.id} className="border-b pb-4" style={{ borderBottomColor: '#f3f4f6' }}>
+                    <p className="text-xs font-bold uppercase mb-1" style={{ color: '#9ca3af' }}>{q.text}</p>
+                    <p className="text-sm font-medium leading-relaxed" style={{ color: '#000000' }}>{answer}</p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-20 pt-8 border-t text-center" style={{ borderTopColor: '#e5e7eb' }}>
+        <p className="text-xs font-bold italic" style={{ color: '#9ca3af' }}>Cảm ơn quý khách đã tin tưởng N-H-Architects!</p>
+        <p className="text-[10px] font-bold tracking-[0.2em] mt-2" style={{ color: '#000000' }}>WWW.NH-ARCHITECTS.VN</p>
+      </div>
+    </div>
+  );
+
   if (isFinished) {
     return (
-      <div className="min-h-screen bg-[#F8F8F8] flex items-center justify-center p-6 font-sans">
-        <motion.div 
-          initial={{ opacity: 0, y: 30 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="max-w-2xl w-full bg-white rounded-[40px] p-12 shadow-2xl text-center border border-black/5 print-hidden"
-        >
-          <div className="w-24 h-24 bg-black rounded-full flex items-center justify-center mx-auto mb-8 shadow-lg">
-            <CheckCircle2 className="w-12 h-12 text-white" />
-          </div>
-          <h1 className="text-4xl font-bold text-black mb-4 tracking-tight uppercase">HOÀN TẤT KHẢO SÁT</h1>
-          <p className="text-lg text-gray-500 mb-10 leading-relaxed">
-            Cảm ơn bạn đã dành thời gian chia sẻ. Đội ngũ kiến trúc sư của <span className="text-black font-bold">N-H-Architects</span> sẽ nghiên cứu kỹ lưỡng các thông tin này để kiến tạo nên một không gian sống đẳng cấp và mang đậm dấu ấn cá nhân của bạn.
-          </p>
-          <div className="flex flex-col gap-4">
-            <button 
-              onClick={exportToExcel}
-              disabled={isExporting}
-              className={`px-8 py-4 bg-green-600 text-white rounded-full hover:bg-green-700 transition-all font-bold shadow-lg flex items-center justify-center gap-2 ${isExporting ? 'opacity-50 cursor-not-allowed' : ''}`}
-            >
-              {isExporting ? (
-                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              ) : (
-                <FileSpreadsheet className="w-5 h-5" />
-              )}
-              {isExporting ? 'Đang xuất Excel...' : 'Xuất file Excel'}
-            </button>
-            <button 
-              onClick={exportToPDF}
-              disabled={isExportingPDF}
-              className={`px-8 py-4 bg-red-600 text-white rounded-full hover:bg-red-700 transition-all font-bold shadow-lg flex items-center justify-center gap-2 ${isExportingPDF ? 'opacity-50 cursor-not-allowed' : ''}`}
-            >
-              {isExportingPDF ? (
-                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              ) : (
-                <FileText className="w-5 h-5" />
-              )}
-              {isExportingPDF ? 'Đang xuất PDF...' : 'Xuất file PDF'}
-            </button>
-            <button 
-              onClick={() => {
-                setIsFinished(false);
-                setActiveSection(0);
-                setAnswers({});
-              }}
-              className="text-sm text-gray-400 hover:text-black transition-colors underline underline-offset-4"
-            >
-              Làm lại khảo sát mới
-            </button>
-          </div>
-        </motion.div>
-      </div>
+      <>
+        <div className="min-h-screen bg-[#F8F8F8] flex items-center justify-center p-6 font-sans">
+          <motion.div 
+            initial={{ opacity: 0, y: 30 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="max-w-2xl w-full bg-white rounded-[40px] p-12 shadow-2xl text-center border border-black/5 print-hidden"
+          >
+            <div className="w-24 h-24 bg-black rounded-full flex items-center justify-center mx-auto mb-8 shadow-lg">
+              <CheckCircle2 className="w-12 h-12 text-white" />
+            </div>
+            <h1 className="text-4xl font-bold text-black mb-4 tracking-tight uppercase">HOÀN TẤT KHẢO SÁT</h1>
+            <p className="text-lg text-gray-500 mb-10 leading-relaxed">
+              Cảm ơn bạn đã dành thời gian chia sẻ. Đội ngũ kiến trúc sư của <span className="text-black font-bold">N-H-Architects</span> sẽ nghiên cứu kỹ lưỡng các thông tin này để kiến tạo nên một không gian sống đẳng cấp và mang đậm dấu ấn cá nhân của bạn.
+            </p>
+            <div className="flex flex-col gap-4">
+              <button 
+                onClick={exportToExcel}
+                disabled={isExporting}
+                className={`px-8 py-4 bg-green-600 text-white rounded-full hover:bg-green-700 transition-all font-bold shadow-lg flex items-center justify-center gap-2 ${isExporting ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
+                {isExporting ? (
+                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <FileSpreadsheet className="w-5 h-5" />
+                )}
+                {isExporting ? 'Đang xuất Excel...' : 'Xuất file Excel'}
+              </button>
+              <button 
+                onClick={exportToPDF}
+                disabled={isExportingPDF}
+                className={`px-8 py-4 bg-red-600 text-white rounded-full hover:bg-red-700 transition-all font-bold shadow-lg flex items-center justify-center gap-2 ${isExportingPDF ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
+                {isExportingPDF ? (
+                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <FileText className="w-5 h-5" />
+                )}
+                {isExportingPDF ? 'Đang xuất PDF...' : 'Xuất file PDF'}
+              </button>
+              <button 
+                onClick={handleGoogleDriveUpload}
+                disabled={isUploadingToDrive}
+                className={`px-8 py-4 bg-blue-600 text-white rounded-full hover:bg-blue-700 transition-all font-bold shadow-lg flex items-center justify-center gap-2 ${isUploadingToDrive ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
+                {isUploadingToDrive ? (
+                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <Upload className="w-5 h-5" />
+                )}
+                {isUploadingToDrive ? 'Đang tải lên Drive...' : 'Lưu Excel vào Google Drive'}
+              </button>
+              <button 
+                onClick={() => {
+                  setIsFinished(false);
+                  setActiveSection(0);
+                  setAnswers({});
+                }}
+                className="text-sm text-gray-400 hover:text-black transition-colors underline underline-offset-4"
+              >
+                Làm lại khảo sát mới
+              </button>
+            </div>
+          </motion.div>
+        </div>
+        {pdfContent}
+      </>
     );
   }
 
@@ -792,59 +990,8 @@ function SurveyApp() {
       </footer>
 
       {/* Hidden content for PDF generation */}
-      <div id="pdf-content" className="fixed left-[-9999px] top-0 w-[800px] bg-white p-12 text-black font-sans">
-        <div className="flex items-center gap-4 mb-12 border-b-2 border-black pb-8">
-          <div className="w-16 h-16 bg-black rounded-full flex items-center justify-center text-white">
-            <Logo className="w-10 h-10" />
-          </div>
-          <div>
-            <h1 className="text-2xl font-black tracking-tighter">N-H-ARCHITECTS</h1>
-            <p className="text-[10px] font-bold tracking-[0.3em] text-gray-400 uppercase">Townhouses & Villas Design</p>
-          </div>
-        </div>
-
-        <div className="mb-12">
-          <h2 className="text-3xl font-bold mb-2 uppercase">BẢN TỔNG HỢP KHẢO SÁT</h2>
-          <p className="text-gray-500 font-medium">Ngày thực hiện: {new Date().toLocaleDateString('vi-VN')}</p>
-        </div>
-
-        <div className="space-y-10">
-          {briefSections.map((section, sIdx) => (
-            <div key={sIdx} className="space-y-4">
-              <h3 className="text-xl font-bold border-l-4 border-black pl-4 uppercase bg-gray-50 py-2">{section.title}</h3>
-              <div className="grid grid-cols-1 gap-4">
-                {section.questions.map((q) => {
-                  let answer = answers[q.id];
-                  if (!answer) return null;
-                  
-                  if (Array.isArray(answer)) {
-                    if (q.type === 'file') {
-                      answer = `${answer.length} hình ảnh đã tải lên`;
-                      const desc = answers[`${q.id}_desc`];
-                      if (desc) answer += ` (${desc})`;
-                    } else {
-                      answer = answer.join(', ');
-                    }
-                  }
-
-                  return (
-                    <div key={q.id} className="border-b border-gray-100 pb-4">
-                      <p className="text-xs font-bold text-gray-400 uppercase mb-1">{q.text}</p>
-                      <p className="text-sm font-medium text-black leading-relaxed">{answer}</p>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div className="mt-20 pt-8 border-t border-gray-200 text-center">
-          <p className="text-xs font-bold text-gray-400 italic">Cảm ơn quý khách đã tin tưởng N-H-Architects!</p>
-          <p className="text-[10px] font-bold tracking-[0.2em] mt-2">WWW.NH-ARCHITECTS.VN</p>
-        </div>
+      {pdfContent}
       </div>
     </div>
-  </div>
   );
 }

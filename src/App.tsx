@@ -28,7 +28,9 @@ import {
   CheckCircle,
   AlertTriangle,
   CloudUpload,
-  Trash2
+  Trash2,
+  CheckSquare,
+  Square
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as ExcelJS from 'exceljs';
@@ -297,9 +299,11 @@ function SurveyApp() {
   const [isAdminView, setIsAdminView] = useState(false);
   const [surveys, setSurveys] = useState<any[]>([]);
   const [isLoadingSurveys, setIsLoadingSurveys] = useState(false);
+  const [selectedSurveys, setSelectedSurveys] = useState<string[]>([]);
 
   const fetchSurveys = async () => {
     setIsLoadingSurveys(true);
+    setSelectedSurveys([]);
     try {
       const q = query(collection(db, 'surveys'), orderBy('completedAt', 'desc'));
       const querySnapshot = await getDocs(q);
@@ -322,10 +326,61 @@ function SurveyApp() {
     try {
       await deleteDoc(doc(db, 'surveys', id));
       setSurveys(prev => prev.filter(s => s.id !== id));
+      setSelectedSurveys(prev => prev.filter(sid => sid !== id));
       alert('Đã xoá bản khảo sát thành công.');
     } catch (error) {
       console.error('Error deleting survey:', error);
       alert('Không thể xoá bản khảo sát.');
+    }
+  };
+
+  const toggleSurveySelection = (id: string) => {
+    setSelectedSurveys(prev => 
+      prev.includes(id) ? prev.filter(sid => sid !== id) : [...prev, id]
+    );
+  };
+
+  const selectAllSurveys = () => {
+    if (selectedSurveys.length === surveys.length && surveys.length > 0) {
+      setSelectedSurveys([]);
+    } else {
+      setSelectedSurveys(surveys.map(s => s.id));
+    }
+  };
+
+  const deleteSelectedSurveys = async () => {
+    if (selectedSurveys.length === 0) return;
+    if (!window.confirm(`Bạn có chắc chắn muốn xoá ${selectedSurveys.length} bản khảo sát đã chọn?`)) return;
+
+    try {
+      setIsLoadingSurveys(true);
+      await Promise.all(selectedSurveys.map(id => deleteDoc(doc(db, 'surveys', id))));
+      setSurveys(prev => prev.filter(s => !selectedSurveys.includes(s.id)));
+      setSelectedSurveys([]);
+      alert('Đã xoá các bản khảo sát thành công.');
+    } catch (error) {
+      console.error('Error deleting surveys:', error);
+      alert('Không thể xoá một số bản khảo sát.');
+    } finally {
+      setIsLoadingSurveys(false);
+    }
+  };
+
+  const deleteAllSurveys = async () => {
+    if (surveys.length === 0) return;
+    if (!window.confirm('CẢNH BÁO: Bạn có chắc chắn muốn xoá TẤT CẢ các bản khảo sát? Hành động này không thể hoàn tác.')) return;
+
+    try {
+      setIsLoadingSurveys(true);
+      await Promise.all(surveys.map(s => deleteDoc(doc(db, 'surveys', s.id))));
+      setSurveys([]);
+      setSelectedSurveys([]);
+      alert('Đã xoá tất cả các bản khảo sát thành công.');
+    } catch (error) {
+      console.error('Error deleting all surveys:', error);
+      alert('Không thể xoá tất cả các bản khảo sát.');
+    } finally {
+      setIsLoadingSurveys(false);
     }
   };
 
@@ -626,56 +681,102 @@ function SurveyApp() {
               <p className="text-gray-400 font-bold">Chưa có khảo sát nào được gửi.</p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {surveys.map((survey) => (
-                <div key={survey.id} className="bg-white rounded-[32px] p-8 border border-black/5 shadow-xl shadow-black/[0.02] flex flex-col justify-between">
-                  <div>
-                    <div className="flex justify-between items-start mb-6">
-                      <div className="p-3 bg-black/5 rounded-2xl">
-                        <User size={24} />
-                      </div>
-                      <div className="flex flex-col items-end gap-2">
-                        <p className="text-[10px] font-black text-gray-300 uppercase tracking-widest">
-                          {new Date(survey.completedAt).toLocaleDateString('vi-VN')}
-                        </p>
-                        <button 
-                          onClick={() => deleteSurvey(survey.id)}
-                          className="p-2 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
-                          title="Xoá khảo sát"
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      </div>
+            <>
+              <div className="flex flex-wrap gap-4 mb-8 items-center bg-white p-4 rounded-2xl border border-black/5 shadow-sm">
+                <button 
+                  onClick={selectAllSurveys}
+                  className="flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-xl transition-all font-bold text-xs"
+                >
+                  {selectedSurveys.length === surveys.length ? <CheckSquare size={16} /> : <Square size={16} />}
+                  {selectedSurveys.length === surveys.length ? 'Bỏ chọn tất cả' : 'Chọn tất cả'}
+                </button>
+                
+                {selectedSurveys.length > 0 && (
+                  <button 
+                    onClick={deleteSelectedSurveys}
+                    className="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 hover:bg-red-100 rounded-xl transition-all font-bold text-xs"
+                  >
+                    <Trash2 size={16} />
+                    Xoá {selectedSurveys.length} đã chọn
+                  </button>
+                )}
+
+                <button 
+                  onClick={deleteAllSurveys}
+                  className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white hover:bg-red-700 rounded-xl transition-all font-bold text-xs ml-auto"
+                >
+                  <Trash2 size={16} />
+                  Xoá tất cả ({surveys.length})
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {surveys.map((survey) => (
+                  <div 
+                    key={survey.id} 
+                    className={`bg-white rounded-[32px] p-8 border transition-all shadow-xl shadow-black/[0.02] flex flex-col justify-between relative ${
+                      selectedSurveys.includes(survey.id) ? 'border-black ring-2 ring-black/5' : 'border-black/5'
+                    }`}
+                  >
+                    <div 
+                      className="absolute top-4 left-4 cursor-pointer z-10"
+                      onClick={() => toggleSurveySelection(survey.id)}
+                    >
+                      {selectedSurveys.includes(survey.id) ? (
+                        <CheckSquare className="text-black" size={20} />
+                      ) : (
+                        <Square className="text-gray-300 hover:text-gray-400" size={20} />
+                      )}
                     </div>
-                    <h3 className="text-xl font-black mb-2">{survey.clientName}</h3>
-                    <p className="text-xs text-gray-400 font-medium mb-8">ID: {survey.id}</p>
+
+                    <div>
+                      <div className="flex justify-between items-start mb-6">
+                        <div className="p-3 bg-black/5 rounded-2xl ml-6">
+                          <User size={24} />
+                        </div>
+                        <div className="flex flex-col items-end gap-2">
+                          <p className="text-[10px] font-black text-gray-300 uppercase tracking-widest">
+                            {new Date(survey.completedAt).toLocaleDateString('vi-VN')}
+                          </p>
+                          <button 
+                            onClick={() => deleteSurvey(survey.id)}
+                            className="p-2 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                            title="Xoá khảo sát"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      </div>
+                      <h3 className="text-xl font-black mb-2">{survey.clientName}</h3>
+                      <p className="text-xs text-gray-400 font-medium mb-8">ID: {survey.id}</p>
+                    </div>
+                    
+                    <div className="space-y-3">
+                      <button 
+                        onClick={() => {
+                          setAnswers(survey.answers);
+                          setTimeout(() => exportToExcel(), 100);
+                        }}
+                        className="w-full flex items-center justify-center gap-2 py-3 bg-gray-50 hover:bg-black hover:text-white rounded-xl transition-all font-bold text-xs"
+                      >
+                        <FileSpreadsheet size={16} />
+                        Tải Excel
+                      </button>
+                      <button 
+                        onClick={() => {
+                          setAnswers(survey.answers);
+                          setTimeout(() => exportToPDF(), 100);
+                        }}
+                        className="w-full flex items-center justify-center gap-2 py-3 bg-gray-50 hover:bg-black hover:text-white rounded-xl transition-all font-bold text-xs"
+                      >
+                        <FileText size={16} />
+                        Tải PDF
+                      </button>
+                    </div>
                   </div>
-                  
-                  <div className="space-y-3">
-                    <button 
-                      onClick={() => {
-                        setAnswers(survey.answers);
-                        setTimeout(() => exportToExcel(), 100);
-                      }}
-                      className="w-full flex items-center justify-center gap-2 py-3 bg-gray-50 hover:bg-black hover:text-white rounded-xl transition-all font-bold text-xs"
-                    >
-                      <FileSpreadsheet size={16} />
-                      Tải Excel
-                    </button>
-                    <button 
-                      onClick={() => {
-                        setAnswers(survey.answers);
-                        setTimeout(() => exportToPDF(), 100);
-                      }}
-                      className="w-full flex items-center justify-center gap-2 py-3 bg-gray-50 hover:bg-black hover:text-white rounded-xl transition-all font-bold text-xs"
-                    >
-                      <FileText size={16} />
-                      Tải PDF
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            </>
           )}
         </div>
       </div>

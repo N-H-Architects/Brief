@@ -27,14 +27,15 @@ import {
   ShieldCheck,
   CheckCircle,
   AlertTriangle,
-  CloudUpload
+  CloudUpload,
+  Trash2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as ExcelJS from 'exceljs';
 import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
 import { db } from './firebase';
-import { collection, addDoc, getDocs, query, orderBy } from 'firebase/firestore';
+import { collection, addDoc, getDocs, query, orderBy, deleteDoc, doc } from 'firebase/firestore';
 import { auth } from './firebase';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
@@ -312,6 +313,19 @@ function SurveyApp() {
       alert('Không thể tải danh sách khảo sát.');
     } finally {
       setIsLoadingSurveys(false);
+    }
+  };
+
+  const deleteSurvey = async (id: string) => {
+    if (!window.confirm('Bạn có chắc chắn muốn xoá bản khảo sát này?')) return;
+    
+    try {
+      await deleteDoc(doc(db, 'surveys', id));
+      setSurveys(prev => prev.filter(s => s.id !== id));
+      alert('Đã xoá bản khảo sát thành công.');
+    } catch (error) {
+      console.error('Error deleting survey:', error);
+      alert('Không thể xoá bản khảo sát.');
     }
   };
 
@@ -620,9 +634,18 @@ function SurveyApp() {
                       <div className="p-3 bg-black/5 rounded-2xl">
                         <User size={24} />
                       </div>
-                      <p className="text-[10px] font-black text-gray-300 uppercase tracking-widest">
-                        {new Date(survey.completedAt).toLocaleDateString('vi-VN')}
-                      </p>
+                      <div className="flex flex-col items-end gap-2">
+                        <p className="text-[10px] font-black text-gray-300 uppercase tracking-widest">
+                          {new Date(survey.completedAt).toLocaleDateString('vi-VN')}
+                        </p>
+                        <button 
+                          onClick={() => deleteSurvey(survey.id)}
+                          className="p-2 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                          title="Xoá khảo sát"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
                     </div>
                     <h3 className="text-xl font-black mb-2">{survey.clientName}</h3>
                     <p className="text-xs text-gray-400 font-medium mb-8">ID: {survey.id}</p>
@@ -1010,7 +1033,7 @@ function SurveyApp() {
           <button 
             onClick={() => {
               const password = prompt('Nhập mật khẩu Admin:');
-              if (password === 'admin123') {
+              if (password === 'giadinhrua@') {
                 setIsAdminView(true);
                 fetchSurveys();
               } else if (password !== null) {

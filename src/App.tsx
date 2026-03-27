@@ -23,7 +23,11 @@ import {
   Upload,
   X,
   FileSpreadsheet,
-  FileText
+  FileText,
+  ShieldCheck,
+  CheckCircle,
+  AlertTriangle,
+  CloudUpload
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as ExcelJS from 'exceljs';
@@ -290,7 +294,63 @@ function SurveyApp() {
   const [isExporting, setIsExporting] = useState(false);
   const [isExportingPDF, setIsExportingPDF] = useState(false);
   const [isUploadingToDrive, setIsUploadingToDrive] = useState(false);
-  const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(null);
+  const [isCheckingConnection, setIsCheckingConnection] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<{
+    ok: boolean;
+    folderIdSet: boolean;
+    serviceAccountSet: boolean;
+    serviceAccountEmail: string;
+  } | null>(null);
+
+  const checkConnection = async () => {
+    setIsCheckingConnection(true);
+    setConnectionStatus(null);
+    try {
+      const response = await fetch('/api/health');
+      const contentType = response.headers.get('content-type');
+      
+      if (response.ok) {
+        if (contentType && contentType.includes('application/json')) {
+          const data = await response.json();
+          setConnectionStatus({
+            ok: true,
+            folderIdSet: data.config.folderIdSet,
+            serviceAccountSet: data.config.serviceAccountSet,
+            serviceAccountEmail: data.config.serviceAccountEmail
+          });
+        } else {
+          const text = await response.text();
+          if (text.includes('<title>Cookie check</title>')) {
+            alert('Trình duyệt đang chặn cookie bảo mật của AI Studio. Vui lòng nhấn vào biểu tượng "Mở trong tab mới" (hình mũi tên ở góc trên bên phải) để sử dụng tính năng này.');
+          } else {
+            throw new Error(`Server returned 200 OK but content type is not JSON. Body starts with: ${text.substring(0, 100)}`);
+          }
+        }
+      } else {
+        if (contentType && contentType.includes('application/json')) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Server returned error');
+        } else {
+          const text = await response.text();
+          if (text.includes('<title>Cookie check</title>')) {
+            throw new Error('Trình duyệt đang chặn cookie bảo mật. Vui lòng mở ứng dụng trong tab mới.');
+          } else {
+            throw new Error(`Server returned non-JSON response (${response.status} ${response.statusText}). Body starts with: ${text.substring(0, 100)}`);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Connection check failed:', error);
+      setConnectionStatus({
+        ok: false,
+        folderIdSet: false,
+        serviceAccountSet: false,
+        serviceAccountEmail: 'Lỗi: ' + (error instanceof Error ? error.message : String(error))
+      });
+    } finally {
+      setIsCheckingConnection(false);
+    }
+  };
   const [isSaving, setIsSaving] = useState(false);
 
   const handleInputChange = (id: string, value: any) => {
@@ -302,11 +362,16 @@ function SurveyApp() {
     try {
       console.log('Attempting ExcelJS generation...');
       let workbook: any;
+      
+      // Try different import patterns for ExcelJS
       if ((ExcelJS as any).Workbook) {
         workbook = new (ExcelJS as any).Workbook();
       } else if ((ExcelJS as any).default && (ExcelJS as any).default.Workbook) {
         workbook = new (ExcelJS as any).default.Workbook();
+      } else if (typeof ExcelJS === 'function') {
+        workbook = new (ExcelJS as any)();
       } else {
+        console.warn('Standard ExcelJS Workbook constructor not found, checking keys:', Object.keys(ExcelJS));
         throw new Error('ExcelJS Workbook constructor not found');
       }
       const worksheet = workbook.addWorksheet('Khao sat N-H Architects');
@@ -438,75 +503,66 @@ function SurveyApp() {
   };
 
   const handleGoogleDriveUpload = async () => {
-    const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
-    if (!clientId || clientId === 'YOUR_GOOGLE_CLIENT_ID') {
-      alert('Vui lòng cấu hình Google Client ID trong phần Secrets (VITE_GOOGLE_CLIENT_ID).');
-      return;
-    }
-    if (!googleAccessToken) {
-      // Initialize Google OAuth2
-      const client = (window as any).google.accounts.oauth2.initTokenClient({
-        client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
-        scope: 'https://www.googleapis.com/auth/drive.file',
-        callback: (response: any) => {
-          if (response.access_token) {
-            setGoogleAccessToken(response.access_token);
-            uploadToDrive(response.access_token);
-          }
-        },
-      });
-      client.requestAccessToken();
-    } else {
-      uploadToDrive(googleAccessToken);
-    }
+    uploadToDrive();
   };
 
-  const uploadToDrive = async (token: string) => {
-    console.log('Starting Google Drive upload (Excel)...');
+  const uploadToDrive = async () => {
+    console.log('Starting Server-side Google Drive upload (Excel)...');
     setIsUploadingToDrive(true);
     try {
       // 1. Generate Excel Blob
       const { blob: excelBlob, fileName } = await getExcelBlob();
       console.log('Excel generated successfully for Drive upload, size:', excelBlob.size);
 
-      // 2. Upload to Google Drive
-      const folderId = import.meta.env.VITE_GOOGLE_DRIVE_FOLDER_ID;
-      const metadata: any = {
-        name: fileName,
-        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      };
+      // 2. Upload to Server Endpoint
+      const formData = new FormData();
+      formData.append('file', excelBlob, fileName);
+      formData.append('fileName', fileName);
 
-      if (folderId && folderId !== 'YOUR_GOOGLE_DRIVE_FOLDER_ID') {
-        metadata.parents = [folderId];
-      }
+      const apiUrl = '/api/upload-to-drive';
+      console.log('Fetching API at:', apiUrl);
 
-      console.log('Uploading Excel to Drive with metadata:', metadata);
-
-      const form = new FormData();
-      form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
-      form.append('file', excelBlob);
-
-      const response = await fetch(`https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&key=${import.meta.env.VITE_GOOGLE_API_KEY}`, {
+      const response = await fetch(apiUrl, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        body: form,
+        body: formData,
       });
 
       if (response.ok) {
-        const result = await response.json();
-        console.log('Drive upload successful:', result);
-        alert('Đã tải file Excel lên Google Drive thành công!');
-      } else {
-        const errorData = await response.json();
-        console.error('Drive Upload Error Response:', errorData);
-        if (response.status === 401) {
-          setGoogleAccessToken(null);
-          alert('Phiên làm việc Google đã hết hạn. Vui lòng thử lại.');
+        const contentType = response.headers.get('content-type');
+        if (contentType && contentType.includes('application/json')) {
+          const result = await response.json();
+          console.log('Drive upload successful:', result);
+          alert('Đã tải file Excel lên Google Drive thành công!');
         } else {
-          alert(`Có lỗi xảy ra khi tải lên Google Drive: ${errorData.error?.message || response.statusText}`);
+          const text = await response.text();
+          console.error('Drive upload returned 200 OK but not JSON:', text);
+          
+          if (text.includes('<title>Cookie check</title>')) {
+            alert('Trình duyệt đang chặn cookie bảo mật của AI Studio. Vui lòng nhấn vào biểu tượng "Mở trong tab mới" (hình mũi tên ở góc trên bên phải) để sử dụng tính năng này.');
+          } else {
+            throw new Error(`Server returned 200 OK but content type is not JSON. Body starts with: ${text.substring(0, 100)}`);
+          }
         }
+      } else {
+        let errorMessage = response.statusText;
+        const contentType = response.headers.get('content-type');
+        
+        if (contentType && contentType.includes('application/json')) {
+          const errorData = await response.json();
+          console.error('Drive Upload Error Response (JSON):', errorData);
+          errorMessage = errorData.error || errorMessage;
+        } else {
+          const text = await response.text();
+          console.error('Drive Upload Error Response (Non-JSON):', text);
+          
+          if (text.includes('<title>Cookie check</title>')) {
+            errorMessage = 'Trình duyệt đang chặn cookie bảo mật. Vui lòng mở ứng dụng trong tab mới để tiếp tục.';
+          } else {
+            errorMessage = `Server returned non-JSON response (${response.status} ${response.statusText}). Body starts with: ${text.substring(0, 100)}`;
+          }
+        }
+        
+        alert(`Có lỗi xảy ra khi tải lên Google Drive: ${errorMessage}`);
       }
     } catch (error) {
       console.error('Drive Upload Error:', error);
@@ -552,13 +608,17 @@ function SurveyApp() {
     } else {
       setIsSaving(true);
       try {
+        console.log('Saving survey to Firestore...');
         await addDoc(collection(db, 'surveys'), {
           clientName: answers['g0_1'] || 'Khách hàng',
           answers: answers,
           completedAt: new Date().toISOString()
         });
+        console.log('Survey saved successfully');
         setIsFinished(true);
       } catch (error) {
+        console.error('Firestore Save Error:', error);
+        alert('Có lỗi xảy ra khi lưu khảo sát. Vui lòng thử lại hoặc chụp màn hình kết quả. Chi tiết: ' + (error instanceof Error ? error.message : String(error)));
         handleFirestoreError(error, OperationType.WRITE, 'surveys');
       } finally {
         setIsSaving(false);
@@ -684,6 +744,47 @@ function SurveyApp() {
                 )}
                 {isUploadingToDrive ? 'Đang tải lên Drive...' : 'Lưu Excel vào Google Drive'}
               </button>
+
+              <button
+                onClick={checkConnection}
+                disabled={isCheckingConnection}
+                className="px-8 py-4 bg-gray-600 text-white rounded-full hover:bg-gray-700 transition-all font-bold shadow-lg flex items-center justify-center gap-2"
+              >
+                {isCheckingConnection ? (
+                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <ShieldCheck className="w-5 h-5" />
+                )}
+                {isCheckingConnection ? 'Đang kiểm tra...' : 'Kiểm tra kết nối Drive'}
+              </button>
+
+              {connectionStatus && (
+                <div className={`p-6 rounded-[32px] border text-left ${connectionStatus.ok ? 'bg-blue-50 border-blue-200' : 'bg-red-50 border-red-200'} text-sm`}>
+                  <h4 className="font-bold mb-3 flex items-center gap-2 text-black">
+                    {connectionStatus.ok ? <CheckCircle size={18} className="text-green-600" /> : <AlertTriangle size={18} className="text-red-600" />}
+                    Trạng thái kết nối Drive:
+                  </h4>
+                  <ul className="space-y-2 text-gray-700">
+                    <li className="flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full ${connectionStatus.folderIdSet ? 'bg-green-500' : 'bg-red-500'}`}></span>
+                      Folder ID: {connectionStatus.folderIdSet ? <span className="text-green-600 font-bold">Đã cấu hình</span> : <span className="text-red-600 font-bold">Chưa cấu hình</span>}
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full ${connectionStatus.serviceAccountSet ? 'bg-green-500' : 'bg-red-500'}`}></span>
+                      Service Account: {connectionStatus.serviceAccountSet ? <span className="text-green-600 font-bold">Đã cấu hình</span> : <span className="text-red-600 font-bold">Chưa cấu hình</span>}
+                    </li>
+                    <li className="mt-4">
+                      <p className="font-bold text-black mb-1">Email Service Account (Copy email này):</p>
+                      <div className="p-3 bg-white border border-black/10 rounded-xl font-mono text-[10px] break-all select-all shadow-inner">
+                        {connectionStatus.serviceAccountEmail}
+                      </div>
+                    </li>
+                    <li className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-xl text-yellow-800 text-xs italic leading-relaxed">
+                      <strong>Quan trọng:</strong> Bạn PHẢI vào Google Drive, chọn thư mục lưu trữ, nhấn "Chia sẻ" và thêm email ở trên với quyền <strong>"Người chỉnh sửa" (Editor)</strong>.
+                    </li>
+                  </ul>
+                </div>
+              )}
               <button 
                 onClick={() => {
                   setIsFinished(false);

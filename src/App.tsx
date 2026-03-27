@@ -329,8 +329,8 @@ function SurveyApp() {
       setSelectedSurveys(prev => prev.filter(sid => sid !== id));
       alert('Đã xoá bản khảo sát thành công.');
     } catch (error) {
-      console.error('Error deleting survey:', error);
-      alert('Không thể xoá bản khảo sát.');
+      handleFirestoreError(error, OperationType.DELETE, `surveys/${id}`);
+      alert('Không thể xoá bản khảo sát. Vui lòng kiểm tra quyền truy cập.');
     }
   };
 
@@ -354,13 +354,19 @@ function SurveyApp() {
 
     try {
       setIsLoadingSurveys(true);
-      await Promise.all(selectedSurveys.map(id => deleteDoc(doc(db, 'surveys', id))));
+      await Promise.all(selectedSurveys.map(async (id) => {
+        try {
+          await deleteDoc(doc(db, 'surveys', id));
+        } catch (error) {
+          handleFirestoreError(error, OperationType.DELETE, `surveys/${id}`);
+          throw error;
+        }
+      }));
       setSurveys(prev => prev.filter(s => !selectedSurveys.includes(s.id)));
       setSelectedSurveys([]);
       alert('Đã xoá các bản khảo sát thành công.');
     } catch (error) {
-      console.error('Error deleting surveys:', error);
-      alert('Không thể xoá một số bản khảo sát.');
+      alert('Không thể xoá một số bản khảo sát. Vui lòng kiểm tra quyền truy cập.');
     } finally {
       setIsLoadingSurveys(false);
     }
@@ -372,13 +378,19 @@ function SurveyApp() {
 
     try {
       setIsLoadingSurveys(true);
-      await Promise.all(surveys.map(s => deleteDoc(doc(db, 'surveys', s.id))));
+      await Promise.all(surveys.map(async (s) => {
+        try {
+          await deleteDoc(doc(db, 'surveys', s.id));
+        } catch (error) {
+          handleFirestoreError(error, OperationType.DELETE, `surveys/${s.id}`);
+          throw error;
+        }
+      }));
       setSurveys([]);
       setSelectedSurveys([]);
       alert('Đã xoá tất cả các bản khảo sát thành công.');
     } catch (error) {
-      console.error('Error deleting all surveys:', error);
-      alert('Không thể xoá tất cả các bản khảo sát.');
+      alert('Không thể xoá tất cả các bản khảo sát. Vui lòng kiểm tra quyền truy cập.');
     } finally {
       setIsLoadingSurveys(false);
     }
